@@ -90,7 +90,7 @@
 
 <div class="win" id="win">
   <div class="badge" id="winbadge">perfect</div>
-  <div class="big">uitgespeeld</div>
+  <div class="big" id="winbig">uitgespeeld</div>
   <div class="streak" id="winstreak"></div>
   <div class="sub" id="winsub"></div>
   <button class="again" id="again">speel nog een keer voor een langere streak</button>
@@ -101,16 +101,21 @@ const cv = document.getElementById('c');
 const ctx = cv.getContext('2d');
 
 // ---- tuning constants (verander hier de "feel") --------------------------
-const GRAVITY      = 2200;   // px/s^2, hoe snel het balletje valt
+const GRAVITY      = 2200;   // level 1: px/s^2, hoe snel het balletje valt
+const GRAVITY_L2   = 3100;   // level 2: zwaarder, balletje valt sneller
 const POWER        = 10;     // hoe hard het schiet per pixel pull
 let   MAX_STRETCH  = 195;    // max pull-afstand; wordt in layout() schermafhankelijk gezet
 const BALL_START_R = 18;     // beginstraal balletje
 const BALL_MIN_R   = 5;      // zo klein wordt het balletje uiteindelijk
-const BALL_STEP    = 2;      // hoeveel het balletje per treffer krimpt
-const BASKET_START_W = 110;  // beginbreedte mand
+const BALL_STEP    = 2;      // hoeveel het balletje per treffer krimpt (level 1)
+const BALL_L2_R    = 9;      // level 2: vast klein balletje, krimpt niet
+const BASKET_START_W = 110;  // level 1 beginbreedte mand
+const BASKET_L2_W  = 90;     // level 2 beginbreedte mand
 const SHRINK_STEP  = 10;     // hoeveel de mand per treffer smaller wordt
 const WIN_GAP      = 5;      // speling in de krapste mand; lukt die, dan heb je het uitgespeeld
 const GRAB_PAD     = 26;     // hoe ver naast het balletje je nog mag grijpen
+const LIVES_L1     = 3;      // level 1: zoveel keer mag je missen
+const LIVES_L2     = 3;      // level 2: ook 3 kansen (uitdaging zit in bal/zwaartekracht)
 // --------------------------------------------------------------------------
 
 let W, H, ground, anchor;
@@ -135,7 +140,13 @@ let aim = null;            // {x,y} huidige sleeppositie
 let hits=0, streak=0, best=0;
 let pulse = 0;             // animatie bij score
 let basketPlaced = false;
-let won = false;           // spel uitgespeeld?
+let won = false;           // overlay actief / spel bevroren?
+let level = 1;             // huidig level
+let maxLives = LIVES_L1;   // kansen in dit level
+let curGravity = GRAVITY;  // zwaartekracht in dit level
+let lives = LIVES_L1;      // resterende kansen
+let overlayMode = 'win';   // 'win' of 'level2'
+let flash = 0, flashMsg='';// korte melding (bijv. bij opnieuw beginnen)
 
 function resetBall(){
   ball.x = anchor.x; ball.y = anchor.y;
@@ -152,11 +163,12 @@ function placeBasketIfNeeded(){
 // bij elke treffer: balletje + mand krimpen en de mand verplaatsen
 // uitgespeeld = scoren in de krapste mand met het kleinste balletje
 function mutate(){
-  const atBallMin   = ball.r <= BALL_MIN_R;
-  const minFitW     = 2*ball.r + 2*basket.wall + WIN_GAP;   // smalste mand waar de bal nog net door kan
+  const ballShrinks = (level === 1);                       // level 2 houdt het kleine balletje vast
+  const minFitW     = 2*ball.r + 2*basket.wall + WIN_GAP;  // smalste mand waar de bal nog net door kan
   const atBasketMin = basket.w <= minFitW + 0.5;
+  const atBallMin   = !ballShrinks || ball.r <= BALL_MIN_R;
 
-  if(atBallMin && atBasketMin){ win(); return; }            // niets kan nog kleiner -> uitgespeeld
+  if(atBallMin && atBasketMin){ completeLevel(); return; } // niets kan nog kleiner -> level uit
 
   // verplaats de mand (variatie blijft)
   const minX = W*0.40, maxX = W - basket.w - 20;            // binnen beeld houden
@@ -165,8 +177,8 @@ function mutate(){
   basket.y = elevated ? (ground - basket.h - (60 + Math.random()*180))
                       : (ground - basket.h);
 
-  // balletje kleiner (tot z'n minimum), daarna mand smaller (nooit smaller dan de bal er net door kan)
-  ball.r = Math.max(BALL_MIN_R, ball.r - BALL_STEP);
+  // level 1: balletje kleiner. daarna (beide levels) mand smaller, nooit smaller dan de bal er net door kan
+  if(ballShrinks) ball.r = Math.max(BALL_MIN_R, ball.r - BALL_STEP);
   const newMinFitW = 2*ball.r + 2*basket.wall + WIN_GAP;
   basket.w = Math.max(newMinFitW, basket.w - SHRINK_STEP);
 }
@@ -212,17 +224,31 @@ function updateAim(p){
   ball.x = anchor.x + dx; ball.y = anchor.y + dy;
 }
 
-function newGame(){
-  hits=0; streak=0; best=0; won=false;
-  ball.r=BALL_START_R; basket.w=BASKET_START_W;
+function setupLevel(l){
+  level = l;
+  if(l === 1){ maxLives=LIVES_L1; curGravity=GRAVITY;    ball.r=BALL_START_R; basket.w=BASKET_START_W; }
+  else        { maxLives=LIVES_L2; curGravity=GRAVITY_L2; ball.r=BALL_L2_R;    basket.w=BASKET_L2_W; }
+  lives=maxLives; won=false;
   basketPlaced=false; placeBasketIfNeeded(); resetBall();
   particles.length = 0;
   document.getElementById('win').classList.remove('show');
+}
+function resetRun(keepBest){
+  if(!keepBest) best=0;            // alleen de reset-knop wist je langste streak
+  hits=0; streak=0;
+  setupLevel(1);
   document.getElementById('hint').style.opacity = '';
   syncHud();
 }
-document.getElementById('reset').addEventListener('click', newGame);
-document.getElementById('again').addEventListener('click', newGame);
+function startLevel2(){
+  setupLevel(2);                   // treffers/streak/beste blijven staan
+  flashMsg = 'level 2 · klein balletje, zwaardere val'; flash = 1.6;
+}
+document.getElementById('reset').addEventListener('click', ()=>resetRun(false)); // alles op nul, terug naar level 1
+document.getElementById('again').addEventListener('click', ()=>{
+  if(overlayMode==='level2') startLevel2();   // door naar level 2
+  else resetRun(true);                        // opnieuw, langste streak blijft staan
+});
 function syncHud(){
   document.getElementById('hits').textContent   = hits;
   document.getElementById('streak').textContent = streak;
@@ -233,7 +259,7 @@ function syncHud(){
 function step(dt){
   if(ball.state!=='fly') return;
   ball.py = ball.y;                         // y vóór deze stap (voor score-detectie)
-  ball.vy += GRAVITY * dt;
+  ball.vy += curGravity * dt;
   ball.x  += ball.vx * dt;
   ball.y  += ball.vy * dt;
 
@@ -268,14 +294,21 @@ function step(dt){
     score(); return;
   }
 
-  // MIS: grond geraakt of beeld uit
+  // MIS: grond geraakt of beeld uit -> een kans kwijt
   if(ball.y + ball.r >= ground || ball.x < -60 || ball.x > W + 60){
-    streak = 0; syncHud(); resetBall();
+    lives--; streak = 0;
+    if(lives <= 0){                       // kansen op -> opnieuw vanaf level 1 (langste streak blijft)
+      flashMsg = maxLives + 'x gemist · opnieuw'; flash = 1.4;
+      resetRun(true);
+    } else {
+      syncHud(); resetBall();
+    }
   }
 }
 
 function score(){
   hits++; streak++; best=Math.max(best,streak);
+  lives = maxLives;              // raak = weer alle kansen terug
   pulse = 1; syncHud(); mutate();
   if(!won) resetBall();          // na de winnende treffer blijft de bal in de mand liggen
 }
@@ -308,18 +341,39 @@ function drawParticles(){
   }
   ctx.globalAlpha = 1;
 }
+function completeLevel(){
+  if(level < 2) advanceLevel();   // level 1 uit -> door naar level 2
+  else win();                     // laatste level uit -> uitgespeeld
+}
+
+function advanceLevel(){
+  won = true; ball.state='won';                 // bevries tot de speler op de knop drukt
+  burst(basket.x + basket.w/2, basket.y + basket.h/2);
+  for(let k=0;k<5;k++) burst(W*(0.1 + 0.2*k), -10);   // feestelijke confetti
+  overlayMode = 'level2';
+  document.getElementById('winbadge').style.display = 'none';
+  document.getElementById('winbig').textContent = 'level 2!';
+  document.getElementById('winstreak').textContent = 'langste streak: ' + best;
+  document.getElementById('winsub').textContent = 'klein balletje, zwaardere zwaartekracht, 3 kansen';
+  document.getElementById('again').textContent = 'start level 2';
+  document.getElementById('win').classList.add('show');
+}
+
 function win(){
   won = true; ball.state='won';
   const perfect = (hits > 0 && streak === hits);          // nooit gemist = foutloos
+  overlayMode = 'win';
 
   burst(basket.x + basket.w/2, basket.y + basket.h/2);
   if(perfect){
     for(let k=0;k<5;k++) burst(W*(0.1 + 0.2*k), -10);     // extra confettiregen van bovenaf
   }
   document.getElementById('winbadge').style.display = perfect ? 'block' : 'none';
+  document.getElementById('winbig').textContent = 'uitgespeeld';
   document.getElementById('winstreak').textContent = 'langste streak: ' + best;
   document.getElementById('winsub').textContent =
     perfect ? 'foutloos van begin tot eind' : (hits + ' treffers');
+  document.getElementById('again').textContent = 'speel nog een keer voor een langere streak';
   document.getElementById('win').classList.add('show');
 }
 
@@ -376,7 +430,33 @@ function draw(){
   ctx.fillStyle = '#ffb454';
   ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2); ctx.fill();
 
+  // level-aanduiding + kansen (levens) bovenin
+  {
+    ctx.fillStyle='rgba(255,255,255,.30)';
+    ctx.font='500 11px "IBM Plex Mono", ui-monospace, monospace';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('level ' + level, W/2, 74);
+    ctx.textAlign='start'; ctx.textBaseline='alphabetic';
+
+    const lr=6, gap=22, ly=96, startX = W/2 - (maxLives-1)*gap/2;
+    for(let i=0;i<maxLives;i++){
+      ctx.beginPath(); ctx.arc(startX + i*gap, ly, lr, 0, Math.PI*2);
+      if(i < lives){ ctx.fillStyle='#ffb454'; ctx.fill(); }
+      else { ctx.strokeStyle='rgba(255,255,255,.18)'; ctx.lineWidth=1.5; ctx.stroke(); }
+    }
+  }
+
   drawParticles();   // confetti bij het uitspelen
+
+  // korte melding (bijv. opnieuw beginnen)
+  if(flash > 0){
+    ctx.globalAlpha = Math.min(1, flash);
+    ctx.fillStyle = '#ffb454';
+    ctx.font = '500 22px "IBM Plex Mono", ui-monospace, monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(flashMsg, W/2, H*0.42);
+    ctx.globalAlpha = 1; ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+  }
 }
 
 // ---- loop ----------------------------------------------------------------
@@ -386,6 +466,7 @@ function frame(now){
   if(dt > 1/30) dt = 1/30;          // tunneling voorkomen bij lag
   step(dt);
   updateParticles(dt);
+  if(flash > 0) flash = Math.max(0, flash - dt);
   draw();
   requestAnimationFrame(frame);
 }
