@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>swish</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#13151a;
+    --ink:rgba(255,255,255,.88);
+    --dim:rgba(255,255,255,.34);
+    --faint:rgba(255,255,255,.08);
+    --accent:#ffb454;        /* the ball */
+    --target:rgba(255,255,255,.55);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;background:var(--bg)}
+  body{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    color:var(--ink);
+    -webkit-user-select:none;user-select:none;
+    -webkit-touch-callout:none;
+    touch-action:none;
+  }
+  canvas{display:block;position:fixed;inset:0}
+
+  /* HUD */
+  .hud{
+    position:fixed;top:22px;left:0;right:0;
+    display:flex;justify-content:center;gap:34px;
+    pointer-events:none;z-index:2;
+    text-transform:lowercase;letter-spacing:.04em;
+  }
+  .stat{display:flex;flex-direction:column;align-items:center;gap:2px}
+  .stat .k{font-size:10px;color:var(--dim)}
+  .stat .v{font-size:19px;font-weight:500;font-variant-numeric:tabular-nums}
+
+  .hint{
+    position:fixed;bottom:22px;left:0;right:0;text-align:center;
+    font-size:12px;color:var(--dim);letter-spacing:.04em;
+    pointer-events:none;z-index:2;transition:opacity .4s;
+  }
+  .reset{
+    position:fixed;bottom:20px;right:22px;
+    font-size:11px;color:var(--dim);letter-spacing:.04em;
+    background:none;border:none;cursor:pointer;font-family:inherit;z-index:3;
+  }
+  .reset:hover{color:var(--ink)}
+
+  /* uitgespeeld-scherm */
+  .win{
+    position:fixed;inset:0;z-index:5;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;
+    background:rgba(19,21,26,.55);backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);
+    opacity:0;pointer-events:none;transition:opacity .6s;
+    text-transform:lowercase;
+  }
+  .win.show{opacity:1;pointer-events:auto}
+  .win .badge{
+    display:none;font-size:11px;letter-spacing:.18em;text-transform:uppercase;font-weight:500;
+    color:var(--bg);background:var(--accent);border-radius:999px;padding:5px 13px;
+    box-shadow:0 0 24px rgba(255,180,84,.45);
+  }
+  .win .big{font-size:38px;font-weight:500;letter-spacing:.02em;color:var(--accent)}
+  .win .streak{font-size:17px;font-weight:500;color:var(--ink);letter-spacing:.03em}
+  .win .sub{font-size:12px;color:var(--dim);letter-spacing:.04em}
+  .win .again{
+    margin-top:14px;font-family:inherit;font-size:12px;letter-spacing:.04em;color:var(--ink);
+    background:none;border:1px solid rgba(255,255,255,.25);border-radius:16px;
+    padding:10px 20px;cursor:pointer;text-transform:lowercase;
+    max-width:84vw;text-align:center;line-height:1.35;
+  }
+  .win .again:hover{border-color:var(--accent);color:var(--accent)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="hud">
+  <div class="stat"><span class="k">treffers</span><span class="v" id="hits">0</span></div>
+  <div class="stat"><span class="k">streak</span><span class="v" id="streak">0</span></div>
+  <div class="stat"><span class="k">beste</span><span class="v" id="best">0</span></div>
+</div>
+
+<div class="hint" id="hint">sleep het balletje naar achter en laat los</div>
+<button class="reset" id="reset">reset</button>
+
+<div class="win" id="win">
+  <div class="badge" id="winbadge">perfect</div>
+  <div class="big">uitgespeeld</div>
+  <div class="streak" id="winstreak"></div>
+  <div class="sub" id="winsub"></div>
+  <button class="again" id="again">speel nog een keer voor een langere streak</button>
+</div>
+
+<script>
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+
+// ---- tuning constants (verander hier de "feel") --------------------------
+const GRAVITY      = 2200;   // px/s^2, hoe snel het balletje valt
+const POWER        = 10;     // hoe hard het schiet per pixel pull
+let   MAX_STRETCH  = 195;    // max pull-afstand; wordt in layout() schermafhankelijk gezet
+const BALL_START_R = 18;     // beginstraal balletje
+const BALL_MIN_R   = 5;      // zo klein wordt het balletje uiteindelijk
+const BALL_STEP    = 2;      // hoeveel het balletje per treffer krimpt
+const BASKET_START_W = 110;  // beginbreedte mand
+const SHRINK_STEP  = 10;     // hoeveel de mand per treffer smaller wordt
+const WIN_GAP      = 5;      // speling in de krapste mand; lukt die, dan heb je het uitgespeeld
+const GRAB_PAD     = 26;     // hoe ver naast het balletje je nog mag grijpen
+// --------------------------------------------------------------------------
+
+let W, H, ground, anchor;
+function layout(){
+  const dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ground = H - 60;
+  // anker hoog en van de rand af -> ruimte om in elke richting te trekken
+  anchor = { x: Math.max(70, W * 0.26), y: ground - Math.max(150, H * 0.24) };
+  // trek-afstand schaalt mee met het scherm (een telefoon heeft minder ruimte)
+  MAX_STRETCH = Math.min(190, Math.min(W, H) * 0.30);
+}
+window.addEventListener('resize', ()=>{ layout(); if(ball.state!=='fly') resetBall(); placeBasketIfNeeded(); });
+
+// ---- game state ----------------------------------------------------------
+const ball = { x:0, y:0, px:0, py:0, vx:0, vy:0, r:BALL_START_R, state:'idle' }; // idle | aim | fly
+const basket = { x:0, y:0, w:BASKET_START_W, h:74, wall:8 };
+let aim = null;            // {x,y} huidige sleeppositie
+let hits=0, streak=0, best=0;
+let pulse = 0;             // animatie bij score
+let basketPlaced = false;
+let won = false;           // spel uitgespeeld?
+
+function resetBall(){
+  ball.x = anchor.x; ball.y = anchor.y;
+  ball.vx = 0; ball.vy = 0; ball.state='idle';
+  aim = null;
+}
+function placeBasketIfNeeded(){
+  if(!basketPlaced){ basket.x = W*0.64; basket.y = ground - basket.h; basketPlaced=true; }
+  // hou mand binnen beeld na resize
+  basket.x = Math.max(W*0.40, Math.min(basket.x, W - basket.w - 24));
+  basket.y = Math.min(basket.y, ground - basket.h);
+}
+
+// bij elke treffer: balletje + mand krimpen en de mand verplaatsen
+// uitgespeeld = scoren in de krapste mand met het kleinste balletje
+function mutate(){
+  const atBallMin   = ball.r <= BALL_MIN_R;
+  const minFitW     = 2*ball.r + 2*basket.wall + WIN_GAP;   // smalste mand waar de bal nog net door kan
+  const atBasketMin = basket.w <= minFitW + 0.5;
+
+  if(atBallMin && atBasketMin){ win(); return; }            // niets kan nog kleiner -> uitgespeeld
+
+  // verplaats de mand (variatie blijft)
+  const minX = W*0.40, maxX = W - basket.w - 20;            // binnen beeld houden
+  basket.x = minX + Math.random()*Math.max(0, maxX - minX);
+  const elevated = Math.random() < 0.45;                    // soms zwevend, soms op de grond
+  basket.y = elevated ? (ground - basket.h - (60 + Math.random()*180))
+                      : (ground - basket.h);
+
+  // balletje kleiner (tot z'n minimum), daarna mand smaller (nooit smaller dan de bal er net door kan)
+  ball.r = Math.max(BALL_MIN_R, ball.r - BALL_STEP);
+  const newMinFitW = 2*ball.r + 2*basket.wall + WIN_GAP;
+  basket.w = Math.max(newMinFitW, basket.w - SHRINK_STEP);
+}
+
+// ---- input ---------------------------------------------------------------
+function pos(e){
+  const t = e.touches ? e.touches[0] : e;
+  return { x:t.clientX, y:t.clientY };
+}
+function near(p, x, y, pad){ return Math.hypot(p.x-x, p.y-y) <= pad; }
+
+// ---- input: aparte touch- en muis-afhandeling (betrouwbaarder dan pointer events in een iOS-webview)
+function startAim(p){
+  if(ball.state!=='idle') return;
+  if(near(p, anchor.x, anchor.y, ball.r + GRAB_PAD)){
+    ball.state='aim'; updateAim(p);
+    document.getElementById('hint').style.opacity = 0;
+  }
+}
+function moveAim(p){ if(ball.state==='aim') updateAim(p); }
+function release(){
+  if(ball.state!=='aim') return;
+  const dx = anchor.x - ball.x, dy = anchor.y - ball.y;   // snelheid = (anchor - ball) * power
+  ball.vx = dx * POWER; ball.vy = dy * POWER;
+  ball.state='fly';
+}
+
+// touch (telefoon/tablet)
+cv.addEventListener('touchstart', e=>{ startAim(pos(e)); if(ball.state==='aim') e.preventDefault(); }, {passive:false});
+cv.addEventListener('touchmove',  e=>{ if(ball.state==='aim'){ moveAim(pos(e)); e.preventDefault(); } }, {passive:false});
+cv.addEventListener('touchend',   e=>{ release(); e.preventDefault(); }, {passive:false});
+cv.addEventListener('touchcancel',()=>{ release(); });   // webview pikte de gesture in: tóch loslaten i.p.v. blijven hangen
+
+// muis (desktop)
+cv.addEventListener('mousedown', e=>{ startAim(pos(e)); });
+window.addEventListener('mousemove', e=>{ moveAim(pos(e)); });
+window.addEventListener('mouseup', ()=>{ release(); });
+
+function updateAim(p){
+  let dx = p.x - anchor.x, dy = p.y - anchor.y;
+  const d = Math.hypot(dx,dy);
+  if(d > MAX_STRETCH){ dx = dx/d*MAX_STRETCH; dy = dy/d*MAX_STRETCH; }
+  ball.x = anchor.x + dx; ball.y = anchor.y + dy;
+}
+
+function newGame(){
+  hits=0; streak=0; best=0; won=false;
+  ball.r=BALL_START_R; basket.w=BASKET_START_W;
+  basketPlaced=false; placeBasketIfNeeded(); resetBall();
+  particles.length = 0;
+  document.getElementById('win').classList.remove('show');
+  document.getElementById('hint').style.opacity = '';
+  syncHud();
+}
+document.getElementById('reset').addEventListener('click', newGame);
+document.getElementById('again').addEventListener('click', newGame);
+function syncHud(){
+  document.getElementById('hits').textContent   = hits;
+  document.getElementById('streak').textContent = streak;
+  document.getElementById('best').textContent   = best;
+}
+
+// ---- physics step --------------------------------------------------------
+function step(dt){
+  if(ball.state!=='fly') return;
+  ball.py = ball.y;                         // y vóór deze stap (voor score-detectie)
+  ball.vy += GRAVITY * dt;
+  ball.x  += ball.vx * dt;
+  ball.y  += ball.vy * dt;
+
+  const rimY   = basket.y;
+  const baseY  = basket.y + basket.h;
+  const innerL = basket.x + basket.wall;
+  const innerR = basket.x + basket.w - basket.wall;
+  const rimR   = basket.wall / 2;
+  const REST   = 0.5;                        // stuiterfactor tegen de rand
+
+  // botsing tegen beide wanden, elk als een verticale capsule (ronde top + binnen/buitenkant)
+  for(const cx of [basket.x + rimR, basket.x + basket.w - rimR]){
+    const cy = Math.max(rimY, Math.min(ball.y, baseY));   // dichtstbijzijnde punt op de wand
+    let nx = ball.x - cx, ny = ball.y - cy;
+    let d  = Math.hypot(nx, ny);
+    const minD = ball.r + rimR;
+    if(d < minD && d > 0.0001){
+      nx /= d; ny /= d;
+      ball.x = cx + nx * minD;               // de bal uit de wand duwen
+      ball.y = cy + ny * minD;
+      const vn = ball.vx*nx + ball.vy*ny;    // snelheid richting de wand
+      if(vn < 0){                            // alleen afketsen als hij er nog in beweegt
+        ball.vx -= (1 + REST) * vn * nx;
+        ball.vy -= (1 + REST) * vn * ny;
+        ball.vx *= 0.985; ball.vy *= 0.985;  // klein beetje energieverlies
+      }
+    }
+  }
+
+  // SCORE: bal zakt van boven door de monding, tussen de wanden door (ook na een gelukkige stuit)
+  if(ball.vy > 0 && ball.py <= rimY && ball.y >= rimY && ball.x > innerL && ball.x < innerR){
+    score(); return;
+  }
+
+  // MIS: grond geraakt of beeld uit
+  if(ball.y + ball.r >= ground || ball.x < -60 || ball.x > W + 60){
+    streak = 0; syncHud(); resetBall();
+  }
+}
+
+function score(){
+  hits++; streak++; best=Math.max(best,streak);
+  pulse = 1; syncHud(); mutate();
+  if(!won) resetBall();          // na de winnende treffer blijft de bal in de mand liggen
+}
+
+// ---- uitgespeeld + beloning ----------------------------------------------
+const particles = [];
+function burst(x, y){
+  const cols = ['#ffb454','#ffffff','#ff8f3a','#ffd98a'];
+  for(let i=0;i<90;i++){
+    const a = Math.random()*Math.PI*2, sp = 120 + Math.random()*340;
+    particles.push({
+      x, y, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp - 140,
+      r:2 + Math.random()*3, col:cols[i % cols.length],
+      life:1.1 + Math.random()*0.9
+    });
+  }
+}
+function updateParticles(dt){
+  for(let i=particles.length-1; i>=0; i--){
+    const p = particles[i];
+    p.vy += 1500*dt; p.x += p.vx*dt; p.y += p.vy*dt; p.life -= dt;
+    if(p.life<=0 || p.y > H+40) particles.splice(i,1);
+  }
+}
+function drawParticles(){
+  for(const p of particles){
+    ctx.globalAlpha = Math.max(0, Math.min(1, p.life));
+    ctx.fillStyle = p.col;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+function win(){
+  won = true; ball.state='won';
+  const perfect = (hits > 0 && streak === hits);          // nooit gemist = foutloos
+
+  burst(basket.x + basket.w/2, basket.y + basket.h/2);
+  if(perfect){
+    for(let k=0;k<5;k++) burst(W*(0.1 + 0.2*k), -10);     // extra confettiregen van bovenaf
+  }
+  document.getElementById('winbadge').style.display = perfect ? 'block' : 'none';
+  document.getElementById('winstreak').textContent = 'langste streak: ' + best;
+  document.getElementById('winsub').textContent =
+    perfect ? 'foutloos van begin tot eind' : (hits + ' treffers');
+  document.getElementById('win').classList.add('show');
+}
+
+// ---- render --------------------------------------------------------------
+function draw(){
+  ctx.clearRect(0,0,W,H);
+
+  // grondlijn (stippels)
+  ctx.strokeStyle = 'rgba(255,255,255,.10)';
+  ctx.lineWidth = 1; ctx.setLineDash([2,6]);
+  ctx.beginPath(); ctx.moveTo(0, ground+.5); ctx.lineTo(W, ground+.5); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // mand
+  const {x,y,w,h,wall} = basket;
+  if(y + h < ground - 1){                  // zwevend? teken een dun pootje
+    ctx.strokeStyle = 'rgba(255,255,255,.14)';
+    ctx.beginPath(); ctx.moveTo(x+w/2, y+h); ctx.lineTo(x+w/2, ground); ctx.stroke();
+  }
+  ctx.strokeStyle = 'var(--target)'; ctx.strokeStyle = 'rgba(255,255,255,.55)';
+  ctx.lineWidth = wall; ctx.lineCap='round'; ctx.lineJoin='round';
+  ctx.beginPath();
+  ctx.moveTo(x+wall/2, y);
+  ctx.lineTo(x+wall/2, y+h);
+  ctx.lineTo(x+w-wall/2, y+h);
+  ctx.lineTo(x+w-wall/2, y);
+  ctx.stroke();
+  // monding-accent
+  ctx.strokeStyle = 'rgba(255,180,84,.30)'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(x+wall, y); ctx.lineTo(x+w-wall, y); ctx.stroke();
+
+  // pulse bij score
+  if(pulse>0){
+    ctx.strokeStyle = `rgba(255,180,84,${pulse*0.7})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x+w/2, y+h/2, (1-pulse)*70 + 10, 0, Math.PI*2);
+    ctx.stroke();
+    pulse = Math.max(0, pulse - 0.04);
+  }
+
+  // elastiek tijdens het mikken
+  if(ball.state==='aim'){
+    ctx.strokeStyle='rgba(255,255,255,.22)'; ctx.lineWidth=2; ctx.setLineDash([4,5]);
+    ctx.beginPath(); ctx.moveTo(anchor.x,anchor.y); ctx.lineTo(ball.x,ball.y); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // ankerpunt
+  ctx.fillStyle='rgba(255,255,255,.18)';
+  ctx.beginPath(); ctx.arc(anchor.x, anchor.y, 3, 0, Math.PI*2); ctx.fill();
+
+  // balletje
+  ctx.fillStyle = '#ffb454';
+  ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2); ctx.fill();
+
+  drawParticles();   // confetti bij het uitspelen
+}
+
+// ---- loop ----------------------------------------------------------------
+let last = performance.now();
+function frame(now){
+  let dt = (now - last)/1000; last = now;
+  if(dt > 1/30) dt = 1/30;          // tunneling voorkomen bij lag
+  step(dt);
+  updateParticles(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+layout(); placeBasketIfNeeded(); resetBall(); syncHud();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
